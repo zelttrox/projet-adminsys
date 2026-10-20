@@ -1,0 +1,15 @@
+---
+- name: Installer et verifier Nginx sur LINUX01
+  hosts: ops
+  become: true
+  tasks:
+  - name: Installer le paquet nginx
+    ansible.builtin.apt:
+      name: nginx
+      state: present
+      update_cache: true
+  - name: S’assurer que nginx est actif au demarrage
+    ansible.builtin.service:
+      name: nginx
+      state: started
+      enabled: true
