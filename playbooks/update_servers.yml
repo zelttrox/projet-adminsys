@@ -1,0 +1,102 @@
+---
+# Mise à jour des serveurs Windows Server 2025 et Ubuntu Server 24.04
+#
+# Usage :
+#   ansible-playbook -i inventory.ini update.yml --ask-vault-pass --ask-become-pass
+#
+# Options utiles :
+#   -e allow_reboot=false        -> installe sans redémarrer (le redémarrage reste à faire)
+#   --limit windows / --limit linux  -> ne mettre à jour qu'un seul groupe
+#   --check                      -> Linux : liste ce qui serait mis à jour, sans rien installer
+
+# ────────────────────────────────────────────────────────────────
+#  WINDOWS SERVER 2025
+# ────────────────────────────────────────────────────────────────
+- name: Mettre à jour Windows Server
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    allow_reboot: true
+    win_update_categories:
+      - CriticalUpdates
+      - SecurityUpdates
+      - UpdateRollups
+      - Updates
+      - DefinitionUpdates
+
+  tasks:
+    - name: Rechercher les mises à jour disponibles
+      ansible.windows.win_updates:
+        category_names: "{{ win_update_categories }}"
+        state: searched
+      register: win_search
+
+    - name: Afficher les mises à jour trouvées
+      ansible.builtin.debug:
+        msg: >-
+          {{ win_search.found_update_count }} mise(s) à jour trouvée(s) :
+          {{ win_search.updates | dict2items | map(attribute='value.title') | list }}
+
+    - name: Installer les mises à jour
+      ansible.windows.win_updates:
+        category_names: "{{ win_update_categories }}"
+        state: installed
+        reboot: "{{ allow_reboot }}"
+        reboot_timeout: 3600       # les gros cumulatifs peuvent être longs à appliquer
+      register: win_result
+      when: win_search.found_update_count > 0
+
+    - name: Résumé Windows
+      ansible.builtin.debug:
+        msg:
+          - "Installées : {{ win_result.installed_update_count | default(0) }}"
+          - "Échecs     : {{ win_result.failed_update_count | default(0) }}"
+          - "Redémarrage encore requis : {{ win_result.reboot_required | default(false) }}"
+
+# ────────────────────────────────────────────────────────────────
+#  UBUNTU SERVER 24.04
+# ────────────────────────────────────────────────────────────────
+- name: Mettre à jour Ubuntu Server
+  hosts: linux
+  become: true
+
+  vars:
+    allow_reboot: true
+
+  tasks:
+    - name: Mettre à jour le cache APT
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Installer toutes les mises à jour (dist-upgrade)
+      ansible.builtin.apt:
+        upgrade: dist
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: apt_result
+
+    - name: Supprimer les paquets devenus inutiles
+      ansible.builtin.apt:
+        autoremove: true
+        autoclean: true
+
+    - name: Vérifier si un redémarrage est nécessaire
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_flag
+
+    - name: Redémarrer si nécessaire
+      ansible.builtin.reboot:
+        msg: "Redémarrage après mises à jour (Ansible)"
+        reboot_timeout: 600
+      when:
+        - reboot_flag.stat.exists
+        - allow_reboot | bool
+
+    - name: Résumé Ubuntu
+      ansible.builtin.debug:
+        msg:
+          - "Paquets mis à jour : {{ 'oui' if apt_result.changed else 'non, déjà à jour' }}"
+          - "Redémarrage requis : {{ reboot_flag.stat.exists }}"
+          - "Redémarré : {{ reboot_flag.stat.exists and (allow_reboot | bool) }}"
