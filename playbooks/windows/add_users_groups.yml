@@ -1,0 +1,12 @@
+- name: Créer les utilisateurs et groupes AD
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Exécuter le script
+      ansible.builtin.script: scripts/users_groups.ps1 -DefaultPassword 'Ch@ngeMe!2026'
+      no_log: true
+      register: resultat
+
+    - name: Afficher la sortie
+      ansible.builtin.debug:
+        var: resultat.stdout_lines
