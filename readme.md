@@ -25,7 +25,7 @@ Ansible est **agentless** : rien n'est installé sur les serveurs cibles. Toutes
                     ┌──────────────────────────┐
                     │  ops01 (nœud de contrôle)│
                     │  Ansible + clé SSH       │
-                    │  192.168.50.129          │
+                    │  192.168.50.20           │
                     └────────────┬─────────────┘
                                  │ SSH (clé)
                 ┌────────────────┴────────────────┐
@@ -34,7 +34,7 @@ Ansible est **agentless** : rien n'est installé sur les serveurs cibles. Toutes
    │ win-dc01                 │      │ linux01                  │
    │ Windows Server 2025      │      │ Ubuntu Server 24.04      │
    │ AD DS – infraready.test  │      │ Serveur web Nginx        │
-   │ 192.168.50.10            │      │                          │
+   │ 192.168.50.10            │      │ 192.168.50.30            │
    └──────────────────────────┘      └──────────────────────────┘
 ```
 
