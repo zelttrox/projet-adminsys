@@ -1,0 +1,131 @@
+Validation locale InfraReady — 2026-11-06 20:12
+Commit : ea2a403 merge: version de reference = depot de la VM OPS01
+Hote   : ops01
+
+────────────────────────────────────────────────────────────
+▶ Ansible : style YAML (yamllint)
+  $ yamllint .
+────────────────────────────────────────────────────────────
+./playbooks/update_servers.yml
+  102:82    error    no new line character at the end of file  (new-line-at-end-of-file)
+
+./playbooks/linux/nginx.yml
+  6:3       error    wrong indentation: expected at least 3  (indentation)
+
+
+────────────────────────────────────────────────────────────
+▶ Ansible : bonnes pratiques (ansible-lint, profil production)
+  $ ansible-lint
+────────────────────────────────────────────────────────────
+[WARNING]: Deprecation warnings can be disabled by setting `deprecation_warnings=False` in ansible.cfg.
+[DEPRECATION WARNING]: oneline has been deprecated. Use another callback plugin, or vendor and/or move the oneline callback to a collection. This feature will be removed from ansible-core version 2.23.
+Origin: <unknown>
+
+oneline
+
+[DEPRECATION WARNING]: tree has been deprecated. Use another callback plugin, or vendor and/or move the tree callback to a collection. This feature will be removed from ansible-core version 2.23.
+Origin: <unknown>
+
+tree
+
+WARNING  Listing 2 violation(s) that are fatal
+Read documentation for instructions on how to ignore specific rule violations.
+
+# Rule Violation Summary
+
+  1 yaml profile:basic tags:formatting,yaml
+  1 yaml profile:basic tags:formatting,yaml
+
+Failed: 2 failure(s), 0 warning(s) in 19 files processed of 37 encountered. Profile 'production' was required, but 'min' profile passed.
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/yaml/\yaml[indentation]]8;;\[0m[2m:[0m [31mWrong indentation: expected at least 3[0m
+[35mplaybooks/linux/nginx.yml[0m:6
+[0m
+[31m[34m]8;;https://docs.ansible.com/projects/lint/rules/yaml/\yaml[new-line-at-end-of-file]]8;;\[0m[2m:[0m [31mNo new line character at the end of file[0m
+[35mplaybooks/update_servers.yml[0m:102
+[0m
+
+────────────────────────────────────────────────────────────
+▶ Ansible : syntaxe de chaque playbook
+  $ syntaxe_playbooks
+────────────────────────────────────────────────────────────
+  OK     playbooks/linux/comptes-permissions.yml
+  OK     playbooks/linux/maintenance.yml
+  OK     playbooks/linux/nginx.yml
+  OK     playbooks/linux/stockage.yml
+  OK     playbooks/monitoring.yml
+  OK     playbooks/pare-feu.yml
+  OK     playbooks/ping-all.yml
+  OK     playbooks/update_servers.yml
+  OK     playbooks/windows/ad-groupes-utilisateurs.yml
+  OK     playbooks/windows/maintenance-windows.yml
+
+────────────────────────────────────────────────────────────
+▶ Supervision : configuration Prometheus
+  $ promtool check config monitoring/prometheus.yml
+────────────────────────────────────────────────────────────
+Checking monitoring/prometheus.yml
+  SUCCESS: 1 rule files found
+ SUCCESS: monitoring/prometheus.yml is valid prometheus config file syntax
+
+Checking /etc/prometheus/rules/infraready.yml
+  SUCCESS: 8 rules found
+
+
+────────────────────────────────────────────────────────────
+▶ Supervision : regles d'alerte
+  $ promtool check rules monitoring/rules/infraready.yml
+────────────────────────────────────────────────────────────
+Checking monitoring/rules/infraready.yml
+  SUCCESS: 8 rules found
+
+
+────────────────────────────────────────────────────────────
+▶ Supervision : tests unitaires des alertes
+  $ bash -c cd monitoring/rules && promtool test rules infraready_test.yml
+────────────────────────────────────────────────────────────
+Unit Testing:  infraready_test.yml
+  SUCCESS
+
+
+────────────────────────────────────────────────────────────
+▶ Supervision : tableau de bord Grafana
+  $ dashboard_json
+────────────────────────────────────────────────────────────
+  OK     monitoring/dashboards/infraready.json: 8 panneaux, JSON valide
+
+────────────────────────────────────────────────────────────
+▶ Securite : vault chiffres, cles privees, mots de passe en clair
+  $ bash scripts/ci/verifier-secrets.sh
+────────────────────────────────────────────────────────────
+== 1. Fichiers vault chiffres
+  OK      inventory/group_vars/linux/vault.yml
+  OK      inventory/group_vars/ops/vault.yml
+  OK      inventory/group_vars/windows/vault.yml
+== 2. Cles privees
+  OK      aucune cle privee
+== 3. Mots de passe en clair dans les variables
+  OK      aucune valeur en clair
+Controle des secrets reussi
+
+────────────────────────────────────────────────────────────
+▶ Securite : secrets dans tout l'historique Git (gitleaks)
+  $ gitleaks detect --source . --redact --no-banner
+────────────────────────────────────────────────────────────
+[90m8:13PM[0m [32mINF[0m 8 commits scanned.
+[90m8:13PM[0m [32mINF[0m scan completed in 81.6ms
+[90m8:13PM[0m [32mINF[0m no leaks found
+
+════════════════════════════ BILAN ════════════════════════════
+  Ansible : style YAML (yamllint)                                ECHEC
+  Ansible : bonnes pratiques (ansible-lint, profil production)   ECHEC
+  Ansible : syntaxe de chaque playbook                           OK
+  Supervision : configuration Prometheus                         OK
+  Supervision : regles d'alerte                                  OK
+  Supervision : tests unitaires des alertes                      OK
+  Supervision : tableau de bord Grafana                          OK
+  Securite : vault chiffres, cles privees, mots de passe en clair OK
+  Securite : secrets dans tout l'historique Git (gitleaks)       OK
+  PowerShell : syntaxe des scripts                               NON EXECUTE (outil pwsh absent : non installe sur OPS01, controle effectue par la CI uniquement)
+════════════════════════════════════════════════════════════════
+RESULTAT : 2 controle(s) en ECHEC
+Rapport : preuves/G_validation_locale_2026-11-06_2012.txt
