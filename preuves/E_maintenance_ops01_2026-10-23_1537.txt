@@ -1,0 +1,22 @@
+Rapport de maintenance InfraReady
+=================================
+Hote          : ops01 (Ubuntu 26.04)
+Date          : 2026-10-23T13:37:19Z
+Mode          : rapport
+Noyau         : 7.0.0-38-generic
+
+Espace disque (seuil 85 %)
+  / : 38.6 % utilise, 14.4 Go libres
+  /boot : 11.0 % utilise, 1.7 Go libres
+
+Services critiques apres intervention
+  ssh : running
+
+Mises a jour disponibles avant intervention : 4
+  - cloud-init-base
+  - cloud-init
+  - ubuntu-pro-client-l10n
+  - ubuntu-pro-client
+Mises a jour appliquees : non
+
+Redemarrage requis : non

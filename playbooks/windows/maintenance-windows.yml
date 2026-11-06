@@ -1,0 +1,226 @@
+---
+# Procedure de mise a jour Windows (WIN-DC01) avec le mecanisme natif :
+# le module win_updates pilote l'agent Windows Update du serveur.
+#
+# Deux modes, comme pour Linux :
+#   - rapport  (par defaut) : controles + recherche des mises a jour, AUCUNE installation
+#   - appliquer             : controles, installation, controles apres,
+#                             redemarrage seulement si autorise
+#
+# Precautions imposees :
+#   - mode appliquer refuse sans confirmation du snapshot (snapshot_ok=oui)
+#   - arret si C: manque d'espace ou si un service AD/DNS est arrete
+#   - WIN-DC01 est l'unique controleur du domaine : son redemarrage coupe
+#     l'annuaire ET le DNS du labo (LINUX01 et OPS01 ne resolvent plus les noms
+#     pendant quelques minutes). Redemarrage uniquement avec autoriser_reboot=true.
+#   - categories limitees aux mises a jour de securite, critiques et cumulatives
+#     (pas de mise a niveau de version)
+#
+# Exemples (depuis la racine du depot, sur OPS01) :
+#   ansible-playbook playbooks/windows/maintenance-windows.yml --ask-vault-pass
+#   ansible-playbook playbooks/windows/maintenance-windows.yml --ask-vault-pass \
+#                    -e mode=appliquer -e snapshot_ok=oui -e autoriser_reboot=true
+
+- name: Maintenance Windows (WIN-DC01)
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    mode: rapport
+    snapshot_ok: non
+    autoriser_reboot: false
+    espace_min_go: 10
+    categories:
+      - SecurityUpdates
+      - CriticalUpdates
+      - UpdateRollups
+    services_critiques: [NTDS, DNS, Netlogon, ADWS, KDC, W32Time, WinRM]
+    dossier_preuves: "{{ playbook_dir }}/../../preuves"
+
+  tasks:
+    - name: Verifier le mode demande
+      ansible.builtin.assert:
+        that: mode in ['rapport', 'appliquer']
+        fail_msg: "mode doit valoir 'rapport' ou 'appliquer' (recu : {{ mode }})"
+
+    - name: Exiger la confirmation du snapshot avant de modifier le systeme
+      ansible.builtin.assert:
+        that: mode == 'rapport' or snapshot_ok == 'oui'
+        fail_msg: >-
+          Mode appliquer : prendre un snapshot VMware de WIN-DC01
+          puis relancer avec -e snapshot_ok=oui
+
+    # ------------------------------------------------------------------ #
+    # Controles AVANT
+    # ------------------------------------------------------------------ #
+    - name: Lire l'etat du systeme (espace, services, dernier demarrage)
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Services)
+          $Ansible.Changed = $false
+          $os = Get-CimInstance Win32_OperatingSystem
+          $c  = Get-PSDrive C
+          [pscustomobject]@{
+              Systeme      = $os.Caption
+              Build        = "$($os.Version).$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR)"
+              Demarrage    = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')
+              LibreGo      = [math]::Round($c.Free / 1GB, 1)
+              TotalGo      = [math]::Round(($c.Used + $c.Free) / 1GB, 1)
+              Services     = @(Get-Service -Name $Services | ForEach-Object { "$($_.Name)=$($_.Status)" })
+              RebootAttente = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+          }
+        parameters:
+          Services: "{{ services_critiques }}"
+        depth: 4
+      register: etat_avant
+
+    - name: Retenir l'etat initial
+      ansible.builtin.set_fact:
+        avant: "{{ etat_avant.output[0] }}"
+
+    - name: "Controler l'espace libre sur C:"
+      ansible.builtin.assert:
+        that: avant.LibreGo | float >= espace_min_go
+        fail_msg: "C: n'a que {{ avant.LibreGo }} Go libres (minimum {{ espace_min_go }} Go) : liberer de l'espace avant maintenance"
+        success_msg: "C: {{ avant.LibreGo }} Go libres sur {{ avant.TotalGo }} Go"
+
+    - name: Controler les services AD et DNS avant intervention
+      ansible.builtin.assert:
+        that: avant.Services | reject('search', '=Running$') | list | length == 0
+        fail_msg: "Services arretes : {{ avant.Services | reject('search', '=Running$') | join(', ') }}"
+        success_msg: "Services critiques en marche : {{ avant.Services | map('regex_replace', '=.*$', '') | join(', ') }}"
+
+    # ------------------------------------------------------------------ #
+    # Mises a jour (agent Windows Update natif)
+    # ------------------------------------------------------------------ #
+    - name: Rechercher les mises a jour disponibles
+      ansible.windows.win_updates:
+        category_names: "{{ categories }}"
+        state: searched
+      register: recherche
+
+    - name: Installer les mises a jour (mode appliquer uniquement)
+      ansible.windows.win_updates:
+        category_names: "{{ categories }}"
+        state: installed
+        reboot: "{{ autoriser_reboot | bool }}"
+        reboot_timeout: 1800
+        log_path: C:\Windows\Temp\infraready-win_updates.log
+      register: installation
+      when: mode == 'appliquer' and recherche.found_update_count > 0
+
+    # ------------------------------------------------------------------ #
+    # Controles APRES
+    # ------------------------------------------------------------------ #
+    - name: Attendre que les services AD soient de nouveau prets
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $limite = (Get-Date).AddMinutes(5)
+          do {
+              try { Get-ADDomain -ErrorAction Stop | Out-Null; $ok = $true }
+              catch { $ok = $false; Start-Sleep -Seconds 10 }
+          } until ($ok -or (Get-Date) -gt $limite)
+          if (-not $ok) { throw "Active Directory ne repond pas 5 minutes apres l'intervention" }
+          "AD operationnel"
+
+    - name: Relire l'etat du systeme
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Services)
+          $Ansible.Changed = $false
+          $os = Get-CimInstance Win32_OperatingSystem
+          [pscustomobject]@{
+              Build         = "$($os.Version).$((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR)"
+              Demarrage     = $os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')
+              LibreGo       = [math]::Round((Get-PSDrive C).Free / 1GB, 1)
+              Services      = @(Get-Service -Name $Services | ForEach-Object { "$($_.Name)=$($_.Status)" })
+              RebootAttente = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+              DnsDomaine    = [bool](Resolve-DnsName infraready.test -ErrorAction SilentlyContinue)
+          }
+        parameters:
+          Services: "{{ services_critiques }}"
+        depth: 4
+      register: etat_apres
+
+    - name: Retenir l'etat final
+      ansible.builtin.set_fact:
+        apres: "{{ etat_apres.output[0] }}"
+
+    - name: Controler les services et le DNS apres intervention
+      ansible.builtin.assert:
+        that:
+          - apres.Services | reject('search', '=Running$') | list | length == 0
+          - apres.DnsDomaine | bool
+        fail_msg: >-
+          Apres maintenance : services arretes
+          {{ apres.Services | reject('search', '=Running$') | list }},
+          DNS du domaine {{ 'OK' if apres.DnsDomaine else 'KO' }}. Consulter l'observateur d'evenements.
+        success_msg: "Services critiques en marche et DNS du domaine operationnel"
+
+    # ------------------------------------------------------------------ #
+    # Rapport ecrit sur OPS01
+    # ------------------------------------------------------------------ #
+    - name: Creer le dossier des preuves sur OPS01
+      ansible.builtin.file:
+        path: "{{ dossier_preuves }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Ecrire le rapport de maintenance Windows
+      vars:
+        horodatage: "{{ now(fmt='%Y-%m-%d_%H%M') }}"
+        trouvees: "{{ recherche.updates | default({}) | dict2items | map(attribute='value') | list }}"
+        reboot_requis: "{{ (installation.reboot_required | default(false)) or apres.RebootAttente }}"
+      ansible.builtin.copy:
+        dest: "{{ dossier_preuves }}/E_maintenance_win-dc01_{{ horodatage }}.txt"
+        mode: "0644"
+        content: |
+          Rapport de maintenance Windows InfraReady
+          =========================================
+          Hote          : {{ inventory_hostname }} ({{ avant.Systeme }})
+          Date          : {{ now(fmt='%Y-%m-%d %H:%M') }} (heure d'OPS01)
+          Mode          : {{ mode }}
+          Categories    : {{ categories | join(', ') }}
+
+          Avant intervention
+            Build             : {{ avant.Build }}
+            Dernier demarrage : {{ avant.Demarrage }}
+            C: libre          : {{ avant.LibreGo }} Go / {{ avant.TotalGo }} Go
+          {% for s in avant.Services %}
+            {{ '%-10s' | format(s.split('=')[0]) }} : {{ s.split('=')[1] }}
+          {% endfor %}
+
+          Mises a jour trouvees : {{ recherche.found_update_count }}
+          {% for u in trouvees %}
+            - {{ u.kb | default([]) | map('regex_replace', '^', 'KB') | join(', ') }} {{ u.title }}
+          {% endfor %}
+          {% if installation is defined and installation is not skipped %}
+          Mises a jour installees : {{ installation.installed_update_count | default(0) }}
+          Echecs                  : {{ installation.failed_update_count | default(0) }}
+          {% else %}
+          Mises a jour installees : aucune (mode {{ mode }})
+          {% endif %}
+
+          Apres intervention
+            Build             : {{ apres.Build }}
+            Dernier demarrage : {{ apres.Demarrage }}
+            C: libre          : {{ apres.LibreGo }} Go
+            DNS du domaine    : {{ 'OK' if apres.DnsDomaine else 'KO' }}
+          {% for s in apres.Services %}
+            {{ '%-10s' | format(s.split('=')[0]) }} : {{ s.split('=')[1] }}
+          {% endfor %}
+
+          Redemarrage en attente : {{ 'OUI' if reboot_requis | bool else 'non' }}
+          {% if reboot_requis | bool %}
+            -> relancer avec -e autoriser_reboot=true (coupure AD/DNS de quelques minutes)
+          {% endif %}
+      delegate_to: localhost
+
+    - name: Resume
+      ansible.builtin.debug:
+        msg:
+          - "Mode : {{ mode }} | mises a jour trouvees : {{ recherche.found_update_count }}"
+          - "Build : {{ avant.Build }} -> {{ apres.Build }}"
+          - "Redemarrage en attente : {{ 'OUI' if apres.RebootAttente else 'non' }}"

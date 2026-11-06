@@ -1,0 +1,258 @@
+---
+# Procedure de maintenance Linux (LINUX01 et OPS01).
+#
+# Deux modes :
+#   - rapport  (par defaut) : controles + liste des mises a jour, AUCUNE modification
+#   - appliquer             : controles, mises a jour, controles apres, redemarrage
+#                             seulement si autorise
+#
+# Precautions imposees par le playbook :
+#   - mode appliquer refuse sans confirmation explicite d'un snapshot (snapshot_ok=oui)
+#   - arret avant toute mise a jour si un disque depasse le seuil ou si un service
+#     critique est arrete (on ne met pas a jour un systeme deja degrade)
+#   - redemarrage uniquement si le systeme le demande ET si autoriser_reboot=true
+#   - jamais de redemarrage d'OPS01 : c'est le controleur Ansible lui-meme
+#
+# Exemples (depuis la racine du depot, sur OPS01) :
+#   ansible-playbook playbooks/linux/maintenance.yml -K
+#   ansible-playbook playbooks/linux/maintenance.yml -K -e mode=appliquer -e snapshot_ok=oui
+#   ansible-playbook playbooks/linux/maintenance.yml -K -e mode=appliquer -e snapshot_ok=oui \
+#                    -e autoriser_reboot=true --limit linux01
+#
+# Un rapport est ecrit pour chaque hote dans preuves/ sur OPS01.
+
+- name: Maintenance Linux
+  hosts: linux:ops
+  become: true
+  serial: 1   # un hote a la fois : si l'un echoue, les suivants ne sont pas touches
+
+  vars:
+    mode: rapport
+    snapshot_ok: non
+    autoriser_reboot: false
+    seuil_disque_pct: 85
+    fuseau: Europe/Paris
+    services_critiques:
+      linux01: [ssh, nginx, prometheus-node-exporter]
+      ops01: [ssh, prometheus, grafana-server, prometheus-node-exporter]
+    dossier_preuves: "{{ playbook_dir }}/../../preuves"
+    # Paquets qui ne doivent jamais etre supprimes par une mise a jour
+    # (incident du 23/10 : autoremove a supprime ansible-core sur OPS01)
+    paquets_proteges: [ansible-core, python3-winrm, openssh-server, nginx, sudo,
+                       prometheus, grafana, prometheus-node-exporter]
+
+  pre_tasks:
+    - name: Verifier le mode demande
+      ansible.builtin.assert:
+        that: mode in ['rapport', 'appliquer']
+        fail_msg: "mode doit valoir 'rapport' ou 'appliquer' (recu : {{ mode }})"
+
+    - name: Exiger la confirmation du snapshot avant de modifier le systeme
+      ansible.builtin.assert:
+        that: mode == 'rapport' or snapshot_ok == 'oui'
+        fail_msg: >-
+          Mode appliquer : prendre un snapshot VMware de {{ inventory_hostname | upper }}
+          puis relancer avec -e snapshot_ok=oui
+
+    - name: Aligner le fuseau horaire (correlation des journaux)
+      community.general.timezone:
+        name: "{{ fuseau }}"
+
+    # ------------------------------------------------------------------ #
+    # Controles AVANT : espace disque et services
+    # ------------------------------------------------------------------ #
+    - name: Mesurer l'occupation des systemes de fichiers
+      ansible.builtin.set_fact:
+        disques: >-
+          {{ ansible_facts.mounts
+             | selectattr('fstype', 'in', ['ext4', 'xfs', 'btrfs'])
+             | selectattr('size_total', 'gt', 0)
+             | list }}
+
+    - name: Calculer le pourcentage utilise
+      ansible.builtin.set_fact:
+        occupation: >-
+          {{ occupation | default([]) + [{
+               'point': item.mount,
+               'pct': (100 * (1 - item.size_available / item.size_total)) | round(1),
+               'libre_go': (item.size_available / 1073741824) | round(1)
+             }] }}
+      loop: "{{ disques }}"
+      loop_control:
+        label: "{{ item.mount }}"
+
+    - name: Controler l'espace disque avant intervention
+      ansible.builtin.assert:
+        that: item.pct < seuil_disque_pct
+        fail_msg: "{{ item.point }} occupe a {{ item.pct }} % (seuil {{ seuil_disque_pct }} %) : liberer de l'espace avant maintenance"
+        success_msg: "{{ item.point }} : {{ item.pct }} % utilise, {{ item.libre_go }} Go libres"
+      loop: "{{ occupation }}"
+      loop_control:
+        label: "{{ item.point }}"
+
+    - name: Lire l'etat des services
+      ansible.builtin.service_facts:
+
+    - name: Controler les services critiques avant intervention
+      ansible.builtin.assert:
+        that: ansible_facts.services[item ~ '.service'].state | default('absent') == 'running'
+        fail_msg: "Service {{ item }} non demarre : corriger avant toute mise a jour"
+        success_msg: "Service {{ item }} : running"
+      loop: "{{ services_critiques[inventory_hostname] | default([]) }}"
+
+  tasks:
+    # ------------------------------------------------------------------ #
+    # Mises a jour
+    # ------------------------------------------------------------------ #
+    - name: Rafraichir la liste des paquets
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Lister les mises a jour disponibles
+      ansible.builtin.command: apt list --upgradable
+      register: dispo
+      changed_when: false
+
+    - name: Retenir la liste des paquets a mettre a jour
+      ansible.builtin.set_fact:
+        paquets: "{{ dispo.stdout_lines | select('search', '/') | map('regex_replace', '/.*$', '') | list }}"
+
+    - name: Inventorier les paquets installes
+      ansible.builtin.package_facts:
+
+    - name: Marquer les paquets proteges comme installes manuellement (exclus d'autoremove)
+      ansible.builtin.command: "apt-mark manual {{ item }}"
+      environment:
+        LC_ALL: C   # messages en anglais, quelle que soit la langue du systeme
+      loop: "{{ paquets_proteges | select('in', ansible_facts.packages) | list }}"
+      register: apt_mark
+      # apt-mark affiche "X set to manually installed." ou "X was already set to manually installed."
+      changed_when: "'already' not in apt_mark.stdout"
+
+    - name: Simuler la mise a jour (paquets supprimes, mises a jour differees)
+      # noqa: command-instead-of-module  (le module apt ne fournit pas de simulation detaillee)
+      ansible.builtin.command: apt-get -s -o APT::Get::AutomaticRemove=true upgrade
+      environment:
+        LC_ALL: C
+      register: simulation
+      changed_when: false
+
+    - name: Analyser la simulation
+      vars:
+        bloc_differe: "{{ simulation.stdout | regex_search('deferred due to phasing:\\n((?: .*\\n?)+)', '\\1') }}"
+      ansible.builtin.set_fact:
+        supprimes: "{{ simulation.stdout_lines | select('match', '^Remv ') | map('split') | map(attribute=1) | list }}"
+        differes: "{{ ((bloc_differe or ['']) | first).split() }}"
+
+    - name: Refuser une mise a jour qui supprimerait un paquet protege
+      ansible.builtin.assert:
+        that: supprimes | intersect(paquets_proteges) | length == 0
+        fail_msg: >-
+          La mise a jour supprimerait {{ supprimes | intersect(paquets_proteges) | join(', ') }}.
+          Arret avant toute modification : analyser avec apt-get -s upgrade.
+        success_msg: "Aucun paquet protege supprime (suppressions prevues : {{ supprimes | join(', ') or 'aucune' }})"
+
+    - name: Appliquer les mises a jour (mode appliquer uniquement)
+      ansible.builtin.apt:
+        upgrade: safe
+        autoremove: true
+      register: maj
+      when: mode == 'appliquer' and paquets | length > 0
+
+    - name: Detecter si un redemarrage est requis
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_requis
+
+    - name: Redemarrer si requis et autorise (jamais le controleur Ansible)
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: "Redemarrage de maintenance InfraReady"
+      when:
+        - mode == 'appliquer'
+        - reboot_requis.stat.exists
+        - autoriser_reboot | bool
+        - ansible_connection | default('ssh') != 'local'
+
+  post_tasks:
+    # ------------------------------------------------------------------ #
+    # Controles APRES et rapport
+    # ------------------------------------------------------------------ #
+    - name: Relire l'etat des services
+      ansible.builtin.service_facts:
+
+    - name: Controler les services critiques apres intervention
+      ansible.builtin.assert:
+        that: ansible_facts.services[item ~ '.service'].state | default('absent') == 'running'
+        fail_msg: "Service {{ item }} arrete apres maintenance : verifier journalctl -u {{ item }}"
+        success_msg: "Service {{ item }} : running"
+      loop: "{{ services_critiques[inventory_hostname] | default([]) }}"
+
+    - name: Relire l'etat du redemarrage requis
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_apres
+
+    - name: Lire le noyau en cours
+      ansible.builtin.command: uname -r
+      register: noyau
+      changed_when: false
+
+    - name: Creer le dossier des preuves sur OPS01
+      ansible.builtin.file:
+        path: "{{ dossier_preuves }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+
+    - name: Ecrire le rapport de maintenance
+      vars:
+        horodatage: "{{ ansible_facts.date_time.date }}_{{ ansible_facts.date_time.hour }}{{ ansible_facts.date_time.minute }}"
+      ansible.builtin.copy:
+        dest: "{{ dossier_preuves }}/E_maintenance_{{ inventory_hostname }}_{{ horodatage }}.txt"
+        mode: "0644"
+        content: |
+          Rapport de maintenance InfraReady
+          =================================
+          Hote          : {{ inventory_hostname }} ({{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }})
+          Date          : {{ ansible_facts.date_time.iso8601 }}
+          Mode          : {{ mode }}
+          Noyau         : {{ noyau.stdout }}
+
+          Espace disque (seuil {{ seuil_disque_pct }} %)
+          {% for d in occupation %}
+            {{ d.point }} : {{ d.pct }} % utilise, {{ d.libre_go }} Go libres
+          {% endfor %}
+
+          Services critiques apres intervention
+          {% for s in services_critiques[inventory_hostname] | default([]) %}
+            {{ s }} : {{ ansible_facts.services[s ~ '.service'].state | default('absent') }}
+          {% endfor %}
+
+          Mises a jour disponibles avant intervention : {{ paquets | length }}
+          {% for p in paquets %}
+            - {{ p }}
+          {% endfor %}
+          Mises a jour differees par Ubuntu (phased updates) : {{ differes | join(', ') or 'aucune' }}
+          Paquets supprimes par la mise a jour : {{ supprimes | join(', ') or 'aucun' }}
+          Mises a jour appliquees : {{ 'oui' if (maj is defined and maj is changed) else 'non' }}
+
+          Redemarrage requis : {{ 'OUI' if reboot_apres.stat.exists else 'non' }}
+          {% if reboot_apres.stat.exists %}
+          {% if ansible_connection | default('ssh') == 'local' %}
+            -> OPS01 est le controleur Ansible : redemarrage manuel a planifier.
+          {% else %}
+            -> relancer avec -e autoriser_reboot=true apres verification du snapshot.
+          {% endif %}
+          {% endif %}
+      delegate_to: localhost
+      become: false
+
+    - name: Resume
+      ansible.builtin.debug:
+        msg:
+          - "Mode : {{ mode }} | mises a jour disponibles : {{ paquets | length }}"
+          - "Disques : {{ occupation | map(attribute='point') | zip(occupation | map(attribute='pct')) | map('join', ' ') | join(' %, ') }} %"
+          - "Redemarrage requis : {{ 'OUI' if reboot_apres.stat.exists else 'non' }}"

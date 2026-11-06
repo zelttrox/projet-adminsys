@@ -1,0 +1,61 @@
+Rapport de maintenance InfraReady
+=================================
+Hote          : linux01 (Ubuntu 26.04)
+Date          : 2026-10-23T12:26:00Z
+Mode          : appliquer
+Noyau         : 7.0.0-38-generic
+
+Espace disque (seuil 85 %)
+  / : 47.1 % utilise, 7.2 Go libres
+  /boot : 11.2 % utilise, 1.7 Go libres
+  /srv/data : 5.3 % utilise, 9.2 Go libres
+
+Services critiques apres intervention
+  ssh : running
+  nginx : running
+
+Mises a jour disponibles avant intervention : 41
+  - cloud-init-base
+  - cloud-init
+  - dmidecode
+  - libaudit-common
+  - libaudit1
+  - libflashrom1
+  - libnetplan1
+  - libnss-systemd
+  - libopeniscsiusr
+  - libpam-systemd
+  - libsystemd-shared
+  - libsystemd0
+  - libudev1
+  - mdadm
+  - netplan-generator
+  - netplan.io
+  - open-iscsi
+  - open-vm-tools
+  - python-apt-common
+  - python3-apt
+  - python3-distupgrade
+  - python3-netplan
+  - rust-coreutils
+  - snapd
+  - sos
+  - systemd-cryptsetup
+  - systemd-resolved
+  - systemd-sysv
+  - systemd
+  - thermald
+  - tmux
+  - ubuntu-kernel-accessories
+  - ubuntu-minimal
+  - ubuntu-pro-client-l10n
+  - ubuntu-pro-client
+  - ubuntu-release-upgrader-core
+  - ubuntu-server-minimal
+  - ubuntu-server
+  - ubuntu-standard
+  - udev
+  - zlib1g
+Mises a jour appliquees : oui
+
+Redemarrage requis : non

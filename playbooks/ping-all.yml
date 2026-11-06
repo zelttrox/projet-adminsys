@@ -1,0 +1,14 @@
+---
+- name: Joindre les hotes Linux
+  hosts: linux:ops
+  gather_facts: false
+  tasks:
+    - name: Ping Linux
+      ansible.builtin.ping:
+
+- name: Joindre les hotes Windows
+  hosts: windows
+  gather_facts: false
+  tasks:
+    - name: Ping Windows
+      ansible.windows.win_ping:

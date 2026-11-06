@@ -1,0 +1,122 @@
+# Validation automatique du depot InfraReady (partie G)
+# Declenchee a chaque push, a chaque pull request, ou a la main (onglet Actions).
+# Aucune machine du labo n'est contactee : on valide le code, pas l'infrastructure.
+---
+name: Validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PROMETHEUS_VERSION: "3.5.0"
+
+jobs:
+  ansible:
+    name: Ansible (yamllint, ansible-lint, syntaxe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les outils
+        run: |
+          pip install ansible-core ansible-lint yamllint
+          ansible-galaxy collection install -r collections/requirements.yml
+
+      - name: Style YAML
+        run: yamllint .
+
+      - name: Bonnes pratiques Ansible (profil production)
+        run: ansible-lint
+
+      - name: Syntaxe de chaque playbook
+        run: |
+          for p in $(find playbooks -name '*.yml' | sort); do
+            echo "::group::$p"
+            ansible-playbook --syntax-check "$p"
+            echo "::endgroup::"
+          done
+
+  supervision:
+    name: Supervision (promtool, tableau de bord)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer promtool
+        run: |
+          curl -sSfL -o prom.tgz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          tar xzf prom.tgz
+          echo "$PWD/prometheus-${PROMETHEUS_VERSION}.linux-amd64" >> "$GITHUB_PATH"
+
+      - name: Configuration Prometheus
+        run: promtool check config monitoring/prometheus.yml
+
+      - name: Regles d'alerte
+        run: promtool check rules monitoring/rules/infraready.yml
+
+      - name: Tests unitaires des alertes
+        working-directory: monitoring/rules
+        run: promtool test rules infraready_test.yml
+
+      - name: Tableau de bord Grafana
+        run: |
+          python3 - <<'PY'
+          import json, glob, sys
+          ok = True
+          for f in glob.glob("monitoring/dashboards/*.json"):
+              d = json.load(open(f))
+              uids = {t["datasource"]["uid"] for p in d["panels"] for t in p.get("targets", [])}
+              if uids != {"prometheus-infraready"}:
+                  print(f"{f}: source de donnees inattendue {uids}"); ok = False
+              print(f"{f}: {len(d['panels'])} panneaux, JSON valide")
+          sys.exit(0 if ok else 1)
+          PY
+
+  securite:
+    name: Securite (secrets, vault)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tout l'historique : un secret supprime reste visible dans les anciens commits
+
+      - name: Vault chiffres, cles privees, mots de passe en clair
+        run: bash scripts/ci/verifier-secrets.sh
+
+      - name: Recherche de secrets dans tout l'historique (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  powershell:
+    name: Scripts PowerShell (syntaxe, PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Analyser les scripts
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem -Path scripts -Recurse -Filter *.ps1
+          $erreurs = 0
+          foreach ($s in $scripts) {
+              $err = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($s.FullName, [ref]$null, [ref]$err) | Out-Null
+              if ($err) { $err | ForEach-Object { "::error file=$($s.FullName)::$($_.Message)" }; $erreurs++ }
+              else { "Syntaxe OK : $($s.Name)" }
+          }
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $res = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error
+          $res | Format-Table -AutoSize
+          if ($res) { $erreurs++ }
+          if ($erreurs) { throw "$erreurs probleme(s) dans les scripts PowerShell" }

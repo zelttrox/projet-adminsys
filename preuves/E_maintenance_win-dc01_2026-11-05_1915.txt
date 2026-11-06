@@ -1,0 +1,36 @@
+Rapport de maintenance Windows InfraReady
+=========================================
+Hote          : win-dc01 (Microsoft Windows Server 2025 Standard Evaluation)
+Date          : 2026-11-05 19:15 (heure d'OPS01)
+Mode          : rapport
+Categories    : SecurityUpdates, CriticalUpdates, UpdateRollups
+
+Avant intervention
+  Build             : 10.0.26100.33650
+  Dernier demarrage : 2026-11-05 19:10
+  C: libre          : 30.3 Go / 48.2 Go
+  ADWS       : Running
+  DNS        : Running
+  KDC        : Running
+  Netlogon   : Running
+  NTDS       : Running
+  W32Time    : Running
+  WinRM      : Running
+
+Mises a jour trouvees : 0
+Mises a jour installees : aucune (mode rapport)
+
+Apres intervention
+  Build             : 10.0.26100.33650
+  Dernier demarrage : 2026-11-05 19:10
+  C: libre          : 30.8 Go
+  DNS du domaine    : OK
+  ADWS       : Running
+  DNS        : Running
+  KDC        : Running
+  Netlogon   : Running
+  NTDS       : Running
+  W32Time    : Running
+  WinRM      : Running
+
+Redemarrage en attente : non

@@ -1,0 +1,173 @@
+---
+# Pare-feu InfraReady : on n'ouvre que les flux dont le labo a besoin.
+#
+# Matrice des flux autorises (tout le reste est refuse en entree) :
+#
+#   Destination   Port      Source                Usage
+#   LINUX01       22/tcp    192.168.50.0/24       SSH (OPS01/Ansible, poste admin)
+#   LINUX01       80/tcp    192.168.50.0/24       site nginx
+#   LINUX01       9100/tcp  192.168.50.20         node_exporter -> Prometheus
+#   OPS01         22/tcp    192.168.50.0/24       SSH (poste admin)
+#   OPS01         3000/tcp  192.168.50.0/24       Grafana
+#   OPS01         9090/tcp  192.168.50.0/24       Prometheus (interface web)
+#   OPS01         9100/tcp  192.168.50.20         node_exporter local
+#   WIN-DC01      5986/tcp  192.168.50.20         WinRM HTTPS (regle existante)
+#   WIN-DC01      9182/tcp  192.168.50.20         windows_exporter (regle existante)
+#   WIN-DC01      AD/DNS    reseau du labo        regles fournies par les roles AD DS / DNS
+#
+# Garde-fous :
+#   - les regles d'acces (SSH, WinRM) sont posees AVANT l'activation du pare-feu
+#   - snapshot recommande ; en cas de blocage, acces console VMware :
+#       Linux   : sudo ufw disable
+#       Windows : Set-NetFirewallProfile -Profile Domain -Enabled False
+#
+# Lancement : ansible-playbook playbooks/pare-feu.yml --ask-vault-pass
+# Rejouable : un second passage doit donner changed=0.
+
+- name: Pare-feu Linux (ufw)
+  hosts: linux:ops
+  become: true
+  serial: 1   # une machine a la fois : si l'acces est perdu, la suivante n'est pas touchee
+
+  vars:
+    reseau_labo: 192.168.50.0/24
+    ip_supervision: 192.168.50.20
+    regles:
+      linux01:
+        - { port: "22", source: "{{ reseau_labo }}", usage: SSH }
+        - { port: "80", source: "{{ reseau_labo }}", usage: site nginx }
+        - { port: "9100", source: "{{ ip_supervision }}", usage: node_exporter }
+      ops01:
+        - { port: "22", source: "{{ reseau_labo }}", usage: SSH }
+        - { port: "3000", source: "{{ reseau_labo }}", usage: Grafana }
+        - { port: "9090", source: "{{ reseau_labo }}", usage: Prometheus }
+        - { port: "9100", source: "{{ ip_supervision }}", usage: node_exporter }
+
+  tasks:
+    - name: Installer ufw
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Autoriser les flux necessaires (avant activation)
+      community.general.ufw:
+        rule: allow
+        proto: tcp
+        port: "{{ item.port }}"
+        from_ip: "{{ item.source }}"
+        comment: "InfraReady - {{ item.usage }}"
+      loop: "{{ regles[inventory_hostname] }}"
+      loop_control:
+        label: "{{ item.port }}/tcp depuis {{ item.source }} ({{ item.usage }})"
+
+    - name: Politique par defaut - refuser en entree, autoriser en sortie
+      community.general.ufw:
+        direction: "{{ item.direction }}"
+        default: "{{ item.politique }}"
+      loop:
+        - { direction: incoming, politique: deny }
+        - { direction: outgoing, politique: allow }
+
+    - name: Journaliser les connexions refusees
+      community.general.ufw:
+        logging: low
+
+    - name: Activer le pare-feu
+      community.general.ufw:
+        state: enabled
+
+  post_tasks:
+    - name: Lire les regles actives
+      ansible.builtin.command: ufw status verbose
+      register: etat_ufw
+      changed_when: false
+
+    - name: Afficher les regles
+      ansible.builtin.debug:
+        var: etat_ufw.stdout_lines
+
+- name: Pare-feu Windows (profil Domaine)
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+    - name: Lire le profil reseau et l'etat des profils du pare-feu
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          [pscustomobject]@{
+              ProfilReseau = "$((Get-NetConnectionProfile | Select-Object -First 1).NetworkCategory)"
+              Profils      = @(Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" })
+          }
+      register: avant
+
+    - name: Activer le profil Domaine (les autres sont deja actifs)
+      ansible.windows.win_powershell:
+        script: |
+          if ((Get-NetFirewallProfile -Profile Domain).Enabled) { $Ansible.Changed = $false; return "deja actif" }
+          Set-NetFirewallProfile -Profile Domain -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow
+          "active"
+
+    - name: Verifier que WinRM repond toujours apres activation
+      ansible.windows.win_ping:
+
+    - name: Afficher l'etat
+      ansible.builtin.debug:
+        msg:
+          - "Profil reseau actif : {{ avant.output[0].ProfilReseau }}"
+          - "Avant : {{ avant.output[0].Profils | join(', ') }}"
+
+# ===================================================================== #
+# Verifications : les flux utiles passent, les autres sont bloques
+# ===================================================================== #
+- name: Verifier les flux autorises depuis OPS01
+  hosts: ops
+  gather_facts: false
+
+  tasks:
+    - name: Le site nginx repond
+      ansible.builtin.uri:
+        url: http://192.168.50.30/
+        status_code: 200
+
+    - name: Toutes les cibles Prometheus sont toujours "up"
+      ansible.builtin.uri:
+        url: http://localhost:9090/api/v1/targets?state=active
+        return_content: true
+      register: cibles
+      retries: 6
+      delay: 10
+      until: (cibles.json.data.activeTargets | rejectattr('health', 'equalto', 'up') | list | length) == 0
+
+- name: Verifier qu'un flux non prevu est refuse (LINUX01 -> exporter Windows)
+  hosts: linux
+  gather_facts: false
+
+  tasks:
+    - name: LINUX01 ne doit pas pouvoir lire windows_exporter (reserve a OPS01)
+      ansible.builtin.wait_for:
+        host: 192.168.50.10
+        port: 9182
+        timeout: 5
+      register: test_refus
+      failed_when: test_refus is succeeded
+
+    - name: Le DNS du domaine fonctionne toujours (pare-feu du DC actif)
+      ansible.builtin.command: resolvectl query win-dc01.infraready.test
+      changed_when: false
+
+- name: Verifier qu'un flux non prevu est refuse (WIN-DC01 -> node_exporter LINUX01)
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+    - name: WIN-DC01 ne doit pas pouvoir lire node_exporter de LINUX01 (reserve a OPS01)
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          $client = New-Object System.Net.Sockets.TcpClient
+          try   { $ok = $client.ConnectAsync('192.168.50.30', 9100).Wait(3000) }
+          catch { $ok = $false }   # connexion rejetee = refus, c'est le resultat attendu
+          finally { $client.Dispose() }
+          if ($ok) { throw "Le port 9100 de LINUX01 est joignable depuis WIN-DC01 : regle ufw trop large" }
+          "refuse comme prevu"

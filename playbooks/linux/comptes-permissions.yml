@@ -1,0 +1,202 @@
+---
+# Comptes, groupes, permissions et delegation sudo sur LINUX01.
+#
+# Scenario InfraReady :
+#   - groupe webadmins : publie le contenu du site (ecriture dans le dossier web)
+#   - groupe support   : consulte le site et les journaux nginx, peut voir l'etat
+#                        du service et le redemarrer, rien de plus
+#
+# Lancement (depuis la racine du depot, sur OPS01) :
+#   ansible-playbook playbooks/linux/comptes-permissions.yml -K
+#
+# Rejouable : un second passage doit donner changed=0.
+
+- name: Comptes, groupes et permissions sur LINUX01
+  hosts: linux
+  become: true
+
+  vars:
+    web_root: /var/www/infraready
+    groupes:
+      - webadmins
+      - support
+    utilisateurs:
+      - { name: webdev1, comment: "Developpeur web 1", groups: [webadmins] }
+      - { name: webdev2, comment: "Developpeur web 2", groups: [webadmins] }
+      - { name: support1, comment: "Technicien support", groups: [support, adm] }
+
+  tasks:
+    # ------------------------------------------------------------------ #
+    # Prerequis
+    # ------------------------------------------------------------------ #
+    - name: Installer acl (necessaire pour become_user vers un compte non root)
+      ansible.builtin.apt:
+        name: acl
+        state: present
+
+    # ------------------------------------------------------------------ #
+    # Groupes et comptes
+    # ------------------------------------------------------------------ #
+    - name: Creer les groupes
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ groupes }}"
+
+    - name: Creer les comptes (connexion par cle uniquement, mot de passe verrouille)
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        comment: "{{ item.comment }}"
+        groups: "{{ item.groups }}"
+        append: true
+        shell: /bin/bash
+        create_home: true
+        password_lock: true
+      loop: "{{ utilisateurs }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Restreindre les repertoires personnels (750)
+      ansible.builtin.file:
+        path: "/home/{{ item.name }}"
+        mode: "0750"
+      loop: "{{ utilisateurs }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ------------------------------------------------------------------ #
+    # Dossier web partage : setgid pour que tout fichier cree herite du
+    # groupe webadmins, lecture seule pour les autres (nginx inclus)
+    # ------------------------------------------------------------------ #
+    - name: Creer le dossier du site (root:webadmins, 2775)
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: root
+        group: webadmins
+        mode: "2775"
+
+    - name: Deposer une page d'accueil
+      ansible.builtin.copy:
+        dest: "{{ web_root }}/index.html"
+        owner: root
+        group: webadmins
+        mode: "0664"
+        force: false   # ne pas ecraser une page modifiee par un webadmin
+        content: |
+          <!doctype html>
+          <html lang="fr"><head><meta charset="utf-8"><title>InfraReady</title></head>
+          <body><h1>InfraReady - LINUX01</h1><p>Site deploye par Ansible.</p></body></html>
+
+    - name: Configurer le site nginx InfraReady
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/infraready
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name linux01.infraready.test;
+              root {{ web_root }};
+              index index.html;
+              access_log /var/log/nginx/infraready_access.log;
+              error_log  /var/log/nginx/infraready_error.log;
+              location / { try_files $uri $uri/ =404; }
+          }
+      notify: Recharger nginx
+
+    - name: Activer le site InfraReady
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/infraready
+        dest: /etc/nginx/sites-enabled/infraready
+        state: link
+      notify: Recharger nginx
+
+    - name: Desactiver le site par defaut
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Recharger nginx
+
+    # ------------------------------------------------------------------ #
+    # Delegation sudo minimale pour le support
+    # ------------------------------------------------------------------ #
+    - name: Autoriser le groupe support a consulter et redemarrer nginx uniquement
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/infraready-support
+        owner: root
+        group: root
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+        content: |
+          # Gere par Ansible - delegation minimale du groupe support
+          %support ALL=(root) NOPASSWD: /usr/bin/systemctl status nginx, /usr/bin/systemctl restart nginx
+
+  handlers:
+    - name: Recharger nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+
+  post_tasks:
+    # ------------------------------------------------------------------ #
+    # Verifications apres execution (aucune ne modifie le systeme)
+    # ------------------------------------------------------------------ #
+    - name: Verifier la configuration nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+
+    - name: Verifier que le site repond
+      ansible.builtin.uri:
+        url: http://localhost/
+        return_content: true
+      register: page
+      failed_when: "'InfraReady' not in page.content"
+
+    - name: Test 1 - webdev1 peut ecrire dans le dossier web
+      ansible.builtin.command: "touch {{ web_root }}/.test-webdev1"
+      become: true
+      become_user: webdev1
+      changed_when: false
+
+    - name: Test 2 - le fichier cree herite du groupe webadmins (setgid)
+      ansible.builtin.stat:
+        path: "{{ web_root }}/.test-webdev1"
+      register: test_fichier
+      failed_when: test_fichier.stat.gr_name != 'webadmins'
+
+    - name: Test 3 - support1 ne peut PAS ecrire dans le dossier web
+      ansible.builtin.command: "touch {{ web_root }}/.test-support1"
+      become: true
+      become_user: support1
+      register: test_support
+      changed_when: false
+      failed_when: test_support.rc == 0
+
+    - name: Test 4 - support1 peut lire les journaux nginx (groupe adm)
+      ansible.builtin.command: "tail -n 1 /var/log/nginx/infraready_access.log"
+      become: true
+      become_user: support1
+      changed_when: false
+
+    - name: Lire les droits sudo de support1
+      ansible.builtin.command: sudo.ws -l -U support1
+      register: sudo_support
+      changed_when: false
+
+    - name: Nettoyer le fichier de test
+      ansible.builtin.file:
+        path: "{{ web_root }}/.test-webdev1"
+        state: absent
+      changed_when: false
+
+    - name: Resume des controles
+      ansible.builtin.debug:
+        msg:
+          - "Site : OK ({{ page.status }})"
+          - "Ecriture webdev1 : OK, groupe herite = {{ test_fichier.stat.gr_name }}"
+          - "Ecriture support1 : refusee (attendu)"
+          - "Lecture journaux support1 : OK"
+          - "{{ sudo_support.stdout_lines | select('search', 'nginx') | list }}"

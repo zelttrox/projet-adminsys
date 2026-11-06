@@ -1,6 +1,6 @@
 ---
 - name: Installer et verifier Nginx sur LINUX01
-  hosts: ops
+  hosts: linux
   become: true
   tasks:
   - name: Installer le paquet nginx

@@ -1,0 +1,39 @@
+Rapport de maintenance Windows InfraReady
+=========================================
+Hote          : win-dc01 (Microsoft Windows Server 2025 Standard Evaluation)
+Date          : 2026-10-23 16:27 (heure d'OPS01)
+Mode          : rapport
+Categories    : SecurityUpdates, CriticalUpdates, UpdateRollups
+
+Avant intervention
+  Build             : 10.0.26100.32230
+  Dernier demarrage : 2026-10-23 14:02
+  C: libre          : 28.8 Go / 48.3 Go
+  ADWS       : Running
+  DNS        : Running
+  KDC        : Running
+  Netlogon   : Running
+  NTDS       : Running
+  W32Time    : Running
+  WinRM      : Running
+
+Mises a jour trouvees : 3
+  - KB5127690 2026-10 .NET Framework Correctif de sécurité (KB5127690)
+  - KB890830 Outil de suppression de logiciels malveillants Windows x64 - v5.146 (KB890830)
+  - KB5126646 2026-10 Correctif de sécurité (KB5126646) (26100.33650)
+Mises a jour installees : aucune (mode rapport)
+
+Apres intervention
+  Build             : 10.0.26100.32230
+  Dernier demarrage : 2026-10-23 14:02
+  C: libre          : 28.8 Go
+  DNS du domaine    : OK
+  ADWS       : Running
+  DNS        : Running
+  KDC        : Running
+  Netlogon   : Running
+  NTDS       : Running
+  W32Time    : Running
+  WinRM      : Running
+
+Redemarrage en attente : non

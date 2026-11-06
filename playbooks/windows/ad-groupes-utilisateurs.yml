@@ -1,0 +1,102 @@
+---
+# Deploie et execute le script de creation des groupes et utilisateurs AD
+# sur WIN-DC01, puis verifie le resultat.
+#
+# Lancement (depuis la racine du depot, sur OPS01) :
+#   ansible-playbook playbooks/windows/ad-groupes-utilisateurs.yml --ask-vault-pass
+#
+# Variables attendues (inventory/group_vars/windows/vault.yml, chiffre) :
+#   vault_windows_password     : mot de passe du compte Ansible sur le domaine
+#   vault_ad_initial_password  : mot de passe initial des comptes crees
+
+- name: Creer les groupes et utilisateurs Active Directory sur WIN-DC01
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    script_local: "{{ playbook_dir }}/../../scripts/windows/New-InfraReadyADObjects.ps1"
+    script_dir: 'C:\InfraReady\scripts'
+    script_distant: 'C:\InfraReady\scripts\New-InfraReadyADObjects.ps1'
+    groupes_attendus:
+      - Employes
+      - IT
+    membres_minimum: 3
+
+  tasks:
+    - name: Verifier la connexion WinRM
+      ansible.windows.win_ping:
+
+    - name: Verifier que le module ActiveDirectory est disponible
+      ansible.windows.win_powershell:
+        script: |
+          $Ansible.Changed = $false
+          if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+              throw "Module ActiveDirectory absent : cet hote n'est pas un controleur de domaine."
+          }
+          (Get-ADDomain).DNSRoot
+      register: ad_domaine
+
+    - name: Creer le dossier des scripts sur le serveur
+      ansible.windows.win_file:
+        path: "{{ script_dir }}"
+        state: directory
+
+    - name: Copier le script PowerShell sur le serveur
+      ansible.windows.win_copy:
+        src: "{{ script_local }}"
+        dest: "{{ script_distant }}"
+
+    - name: Executer le script de creation des objets AD
+      ansible.windows.win_powershell:
+        script: |
+          param(
+              [string]$ScriptPath,
+              [string]$InitialPassword
+          )
+          & $ScriptPath -InitialPassword $InitialPassword
+        parameters:
+          ScriptPath: "{{ script_distant }}"
+          InitialPassword: "{{ vault_ad_initial_password }}"
+      register: ad_creation
+      # Masque le mot de passe dans l'affichage et les journaux.
+      # En cas d'echec, passer temporairement a false pour voir l'erreur.
+      no_log: true
+
+    - name: Afficher le compte-rendu du script
+      ansible.builtin.debug:
+        var: ad_creation.output
+
+    # ---------------------------------------------------------------- #
+    # Verifications apres execution
+    # ---------------------------------------------------------------- #
+    - name: Lire les groupes et leurs membres
+      ansible.windows.win_powershell:
+        script: |
+          param([string[]]$Groupes)
+          $Ansible.Changed = $false
+          foreach ($g in $Groupes) {
+              $membres = @(Get-ADGroupMember -Identity $g | Select-Object -ExpandProperty SamAccountName)
+              [pscustomobject]@{
+                  Groupe  = $g
+                  Nombre  = $membres.Count
+                  Membres = ($membres -join ', ')
+              }
+          }
+        parameters:
+          Groupes: "{{ groupes_attendus }}"
+      register: ad_verif
+
+    - name: Controler la presence des groupes et le nombre de membres
+      ansible.builtin.assert:
+        that:
+          - ad_verif.output | length == groupes_attendus | length
+          - ad_verif.output | map(attribute='Nombre') | min >= membres_minimum
+        fail_msg: "Groupes ou membres manquants : {{ ad_verif.output }}"
+        success_msg: "Les groupes {{ groupes_attendus | join(', ') }} ont chacun au moins {{ membres_minimum }} membres"
+
+    - name: Afficher l'etat final
+      ansible.builtin.debug:
+        msg: "{{ item.Groupe }} ({{ item.Nombre }}) : {{ item.Membres }}"
+      loop: "{{ ad_verif.output }}"
+      loop_control:
+        label: "{{ item.Groupe }}"

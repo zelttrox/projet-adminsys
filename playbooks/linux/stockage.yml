@@ -1,0 +1,140 @@
+---
+# Ajout d'un disque de donnees sur LINUX01 : partition, systeme de fichiers,
+# montage persistant par UUID.
+#
+# Garde-fous :
+#   - le disque cible est passe EXPLICITEMENT en variable (aucune valeur par defaut)
+#   - refus si c'est le disque systeme ou s'il contient deja autre chose que
+#     notre propre partition DATA
+#   - le module filesystem n'ecrase jamais un systeme de fichiers existant
+#
+# Lancement (depuis la racine du depot, sur OPS01) :
+#   ansible-playbook playbooks/linux/stockage.yml -K -e data_disk=/dev/sdb
+#
+# Rejouable : un second passage doit donner changed=0.
+
+- name: Disque de donnees persistant sur LINUX01
+  hosts: linux
+  become: true
+
+  vars:
+    fs_type: ext4
+    fs_label: DATA
+    mount_point: /srv/data
+    mount_group: webadmins
+
+  pre_tasks:
+    - name: Exiger le disque cible en parametre
+      ansible.builtin.assert:
+        that: data_disk is defined and data_disk | length > 0
+        fail_msg: "Indiquer le disque : -e data_disk=/dev/sdX (verifier avec lsblk)"
+
+    - name: Verifier que le disque existe
+      ansible.builtin.stat:
+        path: "{{ data_disk }}"
+      register: disque
+      failed_when: not disque.stat.exists or not disque.stat.isblk
+
+    - name: Lire l'etat du disque
+      ansible.builtin.command: "lsblk -J -o NAME,TYPE,FSTYPE,LABEL,MOUNTPOINTS {{ data_disk }}"
+      register: lsblk_out
+      changed_when: false
+
+    - name: Refuser un disque qui n'est pas vide ou deja prepare par ce playbook
+      vars:
+        dev: "{{ (lsblk_out.stdout | from_json).blockdevices[0] }}"
+        enfants: "{{ dev.children | default([]) }}"
+        vide: "{{ dev.fstype is none and enfants | length == 0 }}"
+        deja_prepare: >-
+          {{ enfants | length == 1 and enfants[0].label == fs_label
+             and enfants[0].fstype == fs_type }}
+      ansible.builtin.assert:
+        that:
+          - dev.mountpoints | select | list | length == 0
+          - vide or deja_prepare
+        fail_msg: >-
+          {{ data_disk }} n'est ni vide ni deja prepare (systeme, autre partition
+          ou donnees presentes). Arret pour ne rien effacer. Etat : {{ dev }}
+        success_msg: "{{ data_disk }} : {{ 'vide, preparation' if vide else 'deja prepare, verification' }}"
+
+  tasks:
+    - name: Creer une table GPT et une partition unique
+      community.general.parted:
+        device: "{{ data_disk }}"
+        label: gpt
+        number: 1
+        name: "{{ fs_label }}"
+        part_start: 0%
+        part_end: 100%
+        state: present
+
+    - name: Determiner le nom de la partition (sdb1, nvme0n2p1...)
+      ansible.builtin.command: "lsblk -lnpo NAME,TYPE {{ data_disk }}"
+      register: parts
+      changed_when: false
+
+    - name: Retenir la partition creee
+      ansible.builtin.set_fact:
+        data_part: "{{ (parts.stdout_lines | select('search', ' part$') | first).split() | first }}"
+
+    - name: Creer le systeme de fichiers (jamais d'ecrasement)
+      community.general.filesystem:
+        dev: "{{ data_part }}"
+        fstype: "{{ fs_type }}"
+        opts: "-L {{ fs_label }}"
+        force: false
+
+    - name: Lire l'UUID de la partition
+      ansible.builtin.command: "blkid -s UUID -o value {{ data_part }}"
+      register: uuid
+      changed_when: false
+
+    - name: Monter de facon persistante par UUID (fstab)
+      ansible.posix.mount:
+        path: "{{ mount_point }}"
+        src: "UUID={{ uuid.stdout }}"
+        fstype: "{{ fs_type }}"
+        # nofail : le systeme demarre meme si le disque est absent
+        opts: defaults,nofail
+        state: mounted
+
+    - name: Droits du point de montage (root:webadmins, setgid, 2770)
+      ansible.builtin.file:
+        path: "{{ mount_point }}"
+        owner: root
+        group: "{{ mount_group }}"
+        mode: "2770"
+
+  post_tasks:
+    - name: Valider la syntaxe de /etc/fstab
+      ansible.builtin.command: findmnt --verify
+      changed_when: false
+
+    - name: Verifier le montage
+      ansible.builtin.command: "findmnt -no SOURCE,FSTYPE,OPTIONS {{ mount_point }}"
+      register: montage
+      changed_when: false
+
+    - name: Verifier l'espace disponible
+      ansible.builtin.command: "df -h {{ mount_point }}"
+      register: espace
+      changed_when: false
+
+    - name: Test d'ecriture par un membre de webadmins
+      ansible.builtin.command: "touch {{ mount_point }}/.test-ecriture"
+      become: true
+      become_user: webdev1
+      changed_when: false
+
+    - name: Nettoyer le fichier de test
+      ansible.builtin.file:
+        path: "{{ mount_point }}/.test-ecriture"
+        state: absent
+      changed_when: false
+
+    - name: Resume
+      ansible.builtin.debug:
+        msg:
+          - "Partition : {{ data_part }} (UUID={{ uuid.stdout }})"
+          - "Montage   : {{ montage.stdout }}"
+          - "{{ espace.stdout_lines | last }}"

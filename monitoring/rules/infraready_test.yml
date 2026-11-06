@@ -1,0 +1,57 @@
+# Tests unitaires des regles : promtool test rules monitoring/rules/infraready_test.yml
+---
+rule_files:
+  - infraready.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: un hote eteint declenche HoteInjoignable apres 1 minute
+    interval: 15s
+    input_series:
+      - series: 'up{job="linux", instance="192.168.50.30:9100", hote="linux01"}'
+        values: "1 1 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: HoteInjoignable
+        exp_alerts: []
+      - eval_time: 105s
+        alertname: HoteInjoignable
+        exp_alerts:
+          - exp_labels: {severite: critique, job: linux, instance: "192.168.50.30:9100", hote: linux01}
+            exp_annotations:
+              resume: "linux01 ne repond plus"
+              description: "L'exporter de linux01 (192.168.50.30:9100) ne repond plus depuis 1 minute : machine eteinte, service arrete ou pare-feu."
+
+  - name: un disque a 90 % declenche DisqueLinuxPresquePlein, pas a 50 %
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_size_bytes{hote="linux01", mountpoint="/srv/data", fstype="ext4"}'
+        values: "100x5"
+      - series: 'node_filesystem_avail_bytes{hote="linux01", mountpoint="/srv/data", fstype="ext4"}'
+        values: "50 50 10 10 10 10"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: DisqueLinuxPresquePlein
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: DisqueLinuxPresquePlein
+        exp_alerts:
+          - exp_labels: {severite: avertissement, hote: linux01, mountpoint: /srv/data, fstype: ext4}
+            exp_annotations:
+              resume: "linux01 : /srv/data a 90.0 %"
+              description: "Le systeme de fichiers /srv/data de linux01 depasse 85 % d'occupation."
+
+  - name: nginx arrete declenche ServiceLinuxArrete
+    interval: 15s
+    input_series:
+      - series: 'node_systemd_unit_state{hote="linux01", name="nginx.service", state="active"}'
+        values: "1 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 90s
+        alertname: ServiceLinuxArrete
+        exp_alerts:
+          - exp_labels: {severite: critique, hote: linux01, name: nginx.service, state: active}
+            exp_annotations:
+              resume: "linux01 : nginx.service arrete"
+              description: "Le service nginx.service n'est plus actif sur linux01. Verifier : systemctl status nginx, journalctl -u nginx."

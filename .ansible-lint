@@ -1,0 +1,8 @@
+---
+# Configuration ansible-lint InfraReady
+profile: production
+
+exclude_paths:
+  - .github/
+  - collections/ansible_collections/
+  - inventory/group_vars/*/vault.yml   # chiffres : illisibles sans le mot de passe, c'est voulu

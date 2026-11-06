@@ -1,0 +1,20 @@
+Rapport de maintenance InfraReady
+=================================
+Hote          : linux01 (Ubuntu 26.04)
+Date          : 2026-10-23T12:30:28Z
+Mode          : rapport
+Noyau         : 7.0.0-38-generic
+
+Espace disque (seuil 85 %)
+  / : 47.4 % utilise, 7.2 Go libres
+  /boot : 11.0 % utilise, 1.7 Go libres
+  /srv/data : 5.3 % utilise, 9.2 Go libres
+
+Services critiques apres intervention
+  ssh : running
+  nginx : running
+
+Mises a jour disponibles avant intervention : 0
+Mises a jour appliquees : non
+
+Redemarrage requis : non
